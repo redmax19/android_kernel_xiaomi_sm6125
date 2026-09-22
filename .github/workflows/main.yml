@@ -1,96 +1,103 @@
-name: Build Mi A3 Custom Kernel (laurel_sprout)
-
+name: Build kernel
 on:
+  workflow_call:
   workflow_dispatch:
   push:
-    branches: [ lineage-23.2 ]
-
+  
 jobs:
   build:
+    name: build
     runs-on: ubuntu-22.04
     steps:
-      - name: Checkout kernel source
-        uses: actions/checkout@v4
 
-      - name: Install toolchain
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            gcc-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabi \
-            bc bison flex libssl-dev make cpio
+      - name: Get branch name
+        id: branch-names
+        uses: tj-actions/branch-names@v8
 
-      - name: Create custom config fragment
-        run: |
-          cat > arch/arm64/configs/vendor/laurel_sprout-custom.config << 'CONFIGEOF'
-          # Custom config for Mi A3 (laurel_sprout) - IR + OTG + Magisk fix
-          CONFIG_RC_CORE=y
-          CONFIG_IR_SPI=y
-          CONFIG_LIRC=y
-          CONFIG_USB_DWC3_DUAL_ROLE=y
-          # CONFIG_STATIC_USERMODEHELPER is not set
-          # CONFIG_DEBUG_INFO is not set
-          CONFIGEOF
+      - name: Setting up SWAP
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 5
 
-      - name: Configure kernel
+      - name: Prepare environment
         run: |
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- vendor/atoll-perf_defconfig
-          scripts/kconfig/merge_config.sh -m -O . .config \
-            arch/arm64/configs/vendor/laurel_sprout.config \
-            arch/arm64/configs/vendor/laurel_sprout-custom.config
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+          sudo apt-get update
+          sudo apt-get install git automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libbz2-1.0 libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev pwgen libswitch-perl policycoreutils minicom libxml-sax-base-perl libxml-simple-perl bc libc6-dev-i386 libx11-dev lib32z-dev libgl1-mesa-dev xsltproc unzip device-tree-compiler
+          sudo apt install -yqq bison build-essential device-tree-compiler flex gcc-aarch64-linux-gnu python3 python3-dev python3-venv python2 swig
+          mkdir -p $GITHUB_WORKSPACE/workdir
+          cd $GITHUB_WORKSPACE/workdir
+          echo "BUILD_TIME=$(TZ=Asia/Shanghai date "+%Y%m%d%H%M")" >> $GITHUB_ENV
+          sudo rm /bin/python
+          sudo ln -s /bin/python2.7 /bin/python
 
-      - name: Fix GCC 13+ compatibility (__has_attribute)
+      - name: Get clang toolchain
         run: |
-          sed -i '1s/^/#ifndef __has_attribute\n#define __has_attribute(x) 0\n#endif\n/' include/linux/compiler_types.h
+          git clone https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b --depth 1 $GITHUB_WORKSPACE/workdir/clang
 
-      - name: Fix bolero format strings
+      - name: Get gcc toolchain
         run: |
-          sed -i 's/"%s: register macro successful:%d\\n"/"register macro successful:%d\\n"/' techpack/audio/4.0/asoc/codecs/bolero/bolero-cdc.c
-          sed -i 's/"%s: dev is null %d\\n"/"%s: dev is null\\n"/' techpack/audio/4.0/asoc/codecs/bolero/bolero-clk-rsc.c
+          git clone https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 -b lineage-19.1 --depth=1 $GITHUB_WORKSPACE/workdir/gcc
 
-      - name: Fix DTC overlay
+      - name: Clone kernel source
         run: |
-          sed -i '/#include <dt-bindings\/thermal\/thermal.h>/d' \
-            arch/arm64/boot/dts/qcom/sdmmagpie-thermal-overlay.dtsi
-          sed -i 's/THERMAL_NO_LIMIT/0xFFFFFFFF/g' \
-            arch/arm64/boot/dts/qcom/sdmmagpie-thermal-overlay.dtsi
-          sed -i 's/THERMAL_MAX_LIMIT/0xFFFFFFFE/g' \
-            arch/arm64/boot/dts/qcom/sdmmagpie-thermal-overlay.dtsi
+          git clone --recursive https://github.com/$GITHUB_REPOSITORY/ -b ${{ steps.branch-names.outputs.current_branch }} --depth 1 $GITHUB_WORKSPACE/workdir/source
 
-      - name: Free up disk space
-        run: |
-          sudo apt-get clean
-          df -h
-
-      - name: Allocate swap
-        run: |
-          sudo swapoff -a 2>/dev/null || true
-          sudo rm -f /swapfile
-          sudo dd if=/dev/zero of=/swapfile bs=1M count=2048 status=progress
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          free -h
+      - name: Setting up ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+         key: build-kernel-mido-kernel
+         max-size: 2G
 
       - name: Build kernel
         run: |
-          scripts/config --file .config --disable DEBUG_INFO
-          echo "=== Testing cross-compiler ==="
-          aarch64-linux-gnu-gcc --version
-          echo "=== Compiling one file ==="
-          time make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- kernel/time/time.o V=1 2>&1
-          echo "=== Single file done ==="
-          ls -la kernel/time/time.o
-          echo "=== Starting full build ==="
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) 2>&1
-          echo "=== BUILD EXIT CODE: $? ==="
+          export KBUILD_BUILD_HOST=Github-Action
+          export KBUILD_BUILD_USER=$(echo ${{ github.actor }})
+          export ARCH="arm64"
+          export SUBARCH="arm64"
+          export CROSS_COMPILE="aarch64-linux-android-"
+          export CLANG_TRIPLE="aarch64-linux-gnu-"
+          export PATH="$GITHUB_WORKSPACE/workdir/clang/bin:$GITHUB_WORKSPACE/workdir/gcc/bin/:$PATH"
+          export TARGET_PRODUCT=sm6150
+          export LD=ld.lld
+          export LLVM=1
+          export LLVM_IAS=1
 
-      - name: Show built images
-        run: |
-          ls -la arch/arm64/boot/Image* arch/arm64/boot/Image.gz 2>/dev/null || echo "No kernel images found"
+          cd $GITHUB_WORKSPACE/workdir/source
+          make -j$(nproc --all) O=out CC=clang ginkgo_defconfig
+          make -j$(nproc --all) O=out CC=clang DTC=dtc Image.gz 2>&1 | tee kernel.log
 
-      - name: Build DTBs
+      - name: Upload logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: android_kernel_qcom_sm7150_${{ env.BUILD_TIME }}_kernel.log
+          path: workdir/source/kernel.log
+
+      - name: Check kernel file
         run: |
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- dtbs 2>&1 | tail -20
-          ls -la arch/arm64/boot/dts/xiaomi/ 2>/dev/null || echo "No xiaomi DTBs found"
+          cd $GITHUB_WORKSPACE/workdir
+          if [ -f source/out/arch/arm64/boot/Image.gz ]; then
+              echo "CHECK_FILE_IS_OK=true" >> $GITHUB_ENV
+          else
+              echo "Kernel output file is empty"
+              exit 1
+          fi
+
+      - name: Upload Image file
+        if: env.CHECK_FILE_IS_OK == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Image-gz-4.14
+          path: workdir/source/out/arch/arm64/boot/Image.gz
+
+      - name: Upload kernel file
+        if: env.CHECK_FILE_IS_OK == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Image-gz-dtb-4.14
+          path: workdir/source/out/arch/arm64/boot/Image.gz-dtb
+      - name: Upload dtb file
+        if: env.CHECK_FILE_IS_OK == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dtbs
+          path: workdir/source/out/arch/arm64/boot/dts/19111/sdmmagpie*
