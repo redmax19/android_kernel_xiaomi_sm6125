@@ -88,7 +88,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Image-gz-4.14
-          path: workdir/source/out/arch/arm64/boot/Image.gz
+          path: |
+           workdir/source/out/arch/arm64/boot/Image
+           workdir/source/out/drivers/memkernel/freea_memk.ko
 
       - name: Upload kernel file
         if: env.CHECK_FILE_IS_OK == 'true'
