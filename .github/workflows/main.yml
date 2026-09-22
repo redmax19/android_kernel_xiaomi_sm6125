@@ -63,6 +63,7 @@ jobs:
           export LLVM_IAS=1
 
           cd $GITHUB_WORKSPACE/workdir/source
+          curl -LSs "https://raw.githubusercontent.com/Poko-Apps/MemKernel/main/kernel/setup.sh" | bash -s M freea
           make -j$(nproc --all) O=out CC=clang ginkgo_defconfig
           make -j$(nproc --all) O=out CC=clang DTC=dtc Image.gz 2>&1 | tee kernel.log
 
