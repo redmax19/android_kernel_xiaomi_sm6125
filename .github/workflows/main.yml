@@ -1,0 +1,96 @@
+name: Build Mi A3 Custom Kernel (laurel_sprout)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ lineage-23.2 ]
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi \
+            bc bison flex libssl-dev make cpio
+
+      - name: Create custom config fragment
+        run: |
+          cat > arch/arm64/configs/vendor/laurel_sprout-custom.config << 'CONFIGEOF'
+          # Custom config for Mi A3 (laurel_sprout) - IR + OTG + Magisk fix
+          CONFIG_RC_CORE=y
+          CONFIG_IR_SPI=y
+          CONFIG_LIRC=y
+          CONFIG_USB_DWC3_DUAL_ROLE=y
+          # CONFIG_STATIC_USERMODEHELPER is not set
+          # CONFIG_DEBUG_INFO is not set
+          CONFIGEOF
+
+      - name: Configure kernel
+        run: |
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- vendor/atoll-perf_defconfig
+          scripts/kconfig/merge_config.sh -m -O . .config \
+            arch/arm64/configs/vendor/laurel_sprout.config \
+            arch/arm64/configs/vendor/laurel_sprout-custom.config
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+
+      - name: Fix GCC 13+ compatibility (__has_attribute)
+        run: |
+          sed -i '1s/^/#ifndef __has_attribute\n#define __has_attribute(x) 0\n#endif\n/' include/linux/compiler_types.h
+
+      - name: Fix bolero format strings
+        run: |
+          sed -i 's/"%s: register macro successful:%d\\n"/"register macro successful:%d\\n"/' techpack/audio/4.0/asoc/codecs/bolero/bolero-cdc.c
+          sed -i 's/"%s: dev is null %d\\n"/"%s: dev is null\\n"/' techpack/audio/4.0/asoc/codecs/bolero/bolero-clk-rsc.c
+
+      - name: Fix DTC overlay
+        run: |
+          sed -i '/#include <dt-bindings\/thermal\/thermal.h>/d' \
+            arch/arm64/boot/dts/qcom/sdmmagpie-thermal-overlay.dtsi
+          sed -i 's/THERMAL_NO_LIMIT/0xFFFFFFFF/g' \
+            arch/arm64/boot/dts/qcom/sdmmagpie-thermal-overlay.dtsi
+          sed -i 's/THERMAL_MAX_LIMIT/0xFFFFFFFE/g' \
+            arch/arm64/boot/dts/qcom/sdmmagpie-thermal-overlay.dtsi
+
+      - name: Free up disk space
+        run: |
+          sudo apt-get clean
+          df -h
+
+      - name: Allocate swap
+        run: |
+          sudo swapoff -a 2>/dev/null || true
+          sudo rm -f /swapfile
+          sudo dd if=/dev/zero of=/swapfile bs=1M count=2048 status=progress
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
+      - name: Build kernel
+        run: |
+          scripts/config --file .config --disable DEBUG_INFO
+          echo "=== Testing cross-compiler ==="
+          aarch64-linux-gnu-gcc --version
+          echo "=== Compiling one file ==="
+          time make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- kernel/time/time.o V=1 2>&1
+          echo "=== Single file done ==="
+          ls -la kernel/time/time.o
+          echo "=== Starting full build ==="
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) 2>&1
+          echo "=== BUILD EXIT CODE: $? ==="
+
+      - name: Show built images
+        run: |
+          ls -la arch/arm64/boot/Image* arch/arm64/boot/Image.gz 2>/dev/null || echo "No kernel images found"
+
+      - name: Build DTBs
+        run: |
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- dtbs 2>&1 | tail -20
+          ls -la arch/arm64/boot/dts/xiaomi/ 2>/dev/null || echo "No xiaomi DTBs found"
